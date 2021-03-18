@@ -84,7 +84,7 @@ private:
     std::string listenerPath_;
 
     AdminTaskManager* taskMgr_{nullptr};
-    std::unique_ptr<TransactionManager> txnMan_;
+    std::unique_ptr<TransactionManager> txnMan_{nullptr};
 };
 
 }  // namespace storage

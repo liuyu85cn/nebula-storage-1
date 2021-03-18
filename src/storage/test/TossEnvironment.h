@@ -9,37 +9,34 @@
 #include <thrift/lib/cpp/util/EnumUtils.h>
 
 #include "TossTestUtils.h"
-
 #include "common/meta/ServerBasedSchemaManager.h"
 
 #define FLOG_FMT(...) LOG(INFO) << folly::sformat(__VA_ARGS__)
 
 DECLARE_int32(heartbeat_interval_secs);
-DEFINE_string(meta_server, "127.0.0.1:44500", "Meta servers' address.");
+class TossEnvironment;
+class TestSpace;
 
 namespace nebula {
 namespace storage {
 
-const std::string kMetaName = "hp-server";  // NOLINT
-constexpr int32_t kMetaPort = 6500;
-const std::string kSpaceName = "test";   // NOLINT
-constexpr int32_t kPart = 5;
-constexpr int32_t kReplica = 3;
-constexpr int32_t kSum = 10000 * 10000;
-
 using StorageClient = storage::GraphStorageClient;
+
 struct TossEnvironment {
-    static TossEnvironment* getInstance(const std::string& metaName, int32_t metaPort) {
-        static TossEnvironment inst(metaName, metaPort);
+    std::shared_ptr<folly::IOThreadPoolExecutor>        executor_;
+    std::unique_ptr<meta::MetaClient>                   mClient_;
+    std::unique_ptr<StorageClient>                      sClient_;
+    std::unique_ptr<storage::InternalStorageClient>     iClient_;
+    std::unique_ptr<meta::SchemaManager>                schemaMan_;
+
+public:
+    static TossEnvironment* getInstance() {
+        static TossEnvironment inst;
         return &inst;
     }
 
-    TossEnvironment(const std::string& metaName, int32_t metaPort) {
+    TossEnvironment() {
         executor_ = std::make_shared<folly::IOThreadPoolExecutor>(20);
-        mClient_ = setupMetaClient(metaName, metaPort);
-        sClient_ = std::make_unique<StorageClient>(executor_, mClient_.get());
-        interClient_ = std::make_unique<storage::InternalStorageClient>(executor_, mClient_.get());
-        schemaMan_ = meta::ServerBasedSchemaManager::create(mClient_.get());
     }
 
     std::unique_ptr<meta::MetaClient>
@@ -95,11 +92,46 @@ struct TossEnvironment {
             }
         }
     }
+};
 
-    int32_t getSpaceId() { return spaceId_; }
+struct TestSpace {
+    TossEnvironment* env_;
+    int32_t spaceId_{};
+    int32_t edgeType_{};
+    int32_t vIdLen_{0};
+    std::string edgeName_;
+    bool useToss_;
 
-    int setupSpace(const std::string& spaceName, int nPart, int nReplica) {
-        auto fDropSpace = mClient_->dropSpace(spaceName, true);
+    meta::MetaClient*                   mClient_;
+    StorageClient*                      sClient_;
+    InternalStorageClient*              iClient_;
+
+public:
+    TestSpace(TossEnvironment* env,
+              const std::string& spaceName,
+              int nPart,
+              int nReplica,
+              meta::cpp2::PropertyType vidType,
+              const std::string& edgeName,
+              std::vector<meta::cpp2::PropertyType> colTypes,
+              bool useToss = true) : env_(env), edgeName_(edgeName), useToss_(useToss) {
+        mClient_ = env->mClient_.get();
+        sClient_ = env->sClient_.get();
+        iClient_ = env->iClient_.get();
+
+        spaceId_ = createSpace(spaceName, nPart, nReplica, vidType);
+        auto colDefs = TossTestUtils::makeColDefs(colTypes);
+        edgeType_ = setupEdgeSchema(colDefs);
+
+        waitLeaderCollection();
+    }
+
+    int createSpace(const std::string& spaceName,
+                    int nPart,
+                    int nReplica,
+                    meta::cpp2::PropertyType vidType) {
+        LOG(INFO) << "TossEnvironment::createSpace()";
+        auto fDropSpace = env_->mClient_->dropSpace(spaceName, true);
         fDropSpace.wait();
         LOG(INFO) << "drop space " << spaceName;
 
@@ -108,11 +140,13 @@ struct TossEnvironment {
         spaceDesc.set_partition_num(nPart);
         spaceDesc.set_replica_factor(nReplica);
         meta::cpp2::ColumnTypeDef colType;
-        colType.set_type(meta::cpp2::PropertyType::INT64);
-        spaceDesc.set_vid_type(colType);
-        spaceDesc.set_isolation_level(meta::cpp2::IsolationLevel::TOSS);
 
-        auto fCreateSpace = mClient_->createSpace(spaceDesc, true);
+        colType.set_type(vidType);
+        spaceDesc.set_vid_type(colType);
+        auto lv = useToss_ ? meta::cpp2::IsolationLevel::TOSS : meta::cpp2::IsolationLevel::DEFAULT;
+        spaceDesc.set_isolation_level(lv);
+
+        auto fCreateSpace = env_->mClient_->createSpace(spaceDesc, true);
         fCreateSpace.wait();
         if (!fCreateSpace.valid()) {
             LOG(FATAL) << "!fCreateSpace.valid()";
@@ -121,17 +155,15 @@ struct TossEnvironment {
             LOG(FATAL) << "!fCreateSpace.value().ok(): "
                        << fCreateSpace.value().status().toString();
         }
-        auto spaceId = fCreateSpace.value().value();
-        LOG(INFO) << folly::sformat("spaceId = {}", spaceId);
-        return spaceId;
+
+        return fCreateSpace.value().value();
     }
 
-    EdgeType setupEdgeSchema(const std::string& edgeName,
-                             std::vector<meta::cpp2::ColumnDef> columns) {
+    EdgeType setupEdgeSchema(std::vector<meta::cpp2::ColumnDef> columns) {
         meta::cpp2::Schema schema;
         schema.set_columns(std::move(columns));
 
-        auto fCreateEdgeSchema = mClient_->createEdgeSchema(spaceId_, edgeName, schema, true);
+        auto fCreateEdgeSchema = mClient_->createEdgeSchema(spaceId_, edgeName_, schema, true);
         fCreateEdgeSchema.wait();
 
         if (!fCreateEdgeSchema.valid() || !fCreateEdgeSchema.value().ok()) {
@@ -140,28 +172,12 @@ struct TossEnvironment {
         return fCreateEdgeSchema.value().value();
     }
 
-    cpp2::EdgeKey generateEdgeKey(int64_t srcId, int rank, int dstId = 0) {
-        cpp2::EdgeKey edgeKey;
-        edgeKey.set_src(srcId);
-
-        edgeKey.set_edge_type(edgeType_);
-        edgeKey.set_ranking(rank);
-        if (dstId == 0) {
-            dstId = kSum - srcId;
+    void waitLeaderCollection() {
+        int sleepSecs = FLAGS_heartbeat_interval_secs + 2;
+        while (sleepSecs) {
+            LOG(INFO) << "sleep for " << sleepSecs-- << " sec";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        edgeKey.set_dst(dstId);
-        return edgeKey;
-    }
-
-    cpp2::NewEdge generateEdge(int srcId,
-                               int rank,
-                               std::vector<nebula::Value> values,
-                               int dstId = 0) {
-        cpp2::NewEdge newEdge;
-
-        cpp2::EdgeKey edgeKey = generateEdgeKey(srcId, rank, dstId);
-        newEdge.set_key(std::move(edgeKey));
-        newEdge.set_props(std::move(values));
 
         return newEdge;
     }
@@ -171,9 +187,7 @@ struct TossEnvironment {
         std::swap(*(*e.key_ref()).src_ref(), *(*e.key_ref()).dst_ref());
         (*e.key_ref()).set_edge_type(-e.get_key().get_edge_type());
         return e;
-    }
-
-    nebula::cpp2::ErrorCode syncAddMultiEdges(std::vector<cpp2::NewEdge>& edges, bool useToss) {
+    cpp2::ErrorCode syncAddMultiEdges(std::vector<cpp2::NewEdge>& edges, bool useToss) {
         bool retLeaderChange = false;
         int32_t retry = 0;
         int32_t retryMax = 10;
@@ -239,199 +253,13 @@ struct TossEnvironment {
         std::vector<std::string> colNames;
         for (auto i = 0U; i < n; ++i) {
             colNames.emplace_back(folly::sformat("c{}", i+1));
-        }
-        return colNames;
     }
 
-    std::vector<Value> getProps(cpp2::NewEdge edge) {
-        // nebula::DataSet ds;  ===> will crash if not set
-        std::vector<Value> ret;
-        nebula::Row row;
-        row.values.emplace_back(edge.get_key().get_src());
-        row.values.emplace_back(edge.get_key().get_edge_type());
-        row.values.emplace_back(edge.get_key().get_ranking());
-        // auto sDst = std::string(reinterpret_cast<const char*>(&edge.key.dst.getInt()), 8);
-        row.values.emplace_back(edge.get_key().get_dst());
-
-        nebula::DataSet ds;
-        ds.rows.emplace_back(std::move(row));
-
-        std::vector<cpp2::EdgeProp> props;
-        cpp2::EdgeProp oneProp;
-        oneProp.set_type(edge.get_key().get_edge_type());
-        props.emplace_back(oneProp);
-
-        auto needRetry = false;
-        int retries = 0;
-        int retryLimit = 5;
-        // folly::Future<StorageRpcResponse<cpp2::GetPropResponse>> frpc;
-        do {
-            auto frpc = sClient_
-                            ->getProps(spaceId_,
-                                       ds, /*DataSet*/
-                                       nullptr,       /*vector<cpp2::VertexProp>*/
-                                       &props,        /*vector<cpp2::EdgeProp>*/
-                                       nullptr        /*expressions*/)
-                            .via(executor_.get());
-            frpc.wait();
-            if (!frpc.valid()) {
-                LOG(INFO) << "getProps rpc invalid()";
-                needRetry = true;
-                continue;
-            }
-
-            // StorageRpcResponse<cpp2::GetPropResponse>
-            auto& rpcResp = frpc.value();
-            LOG(INFO) << "rpcResp.succeeded()=" << rpcResp.succeeded()
-                      << ", responses().size()=" << rpcResp.responses().size();
-            if (!rpcResp.failedParts().empty()) {
-                LOG(INFO) << "rpcResp.failedParts().size()=" << rpcResp.failedParts().size();
-                for (auto& p : rpcResp.failedParts()) {
-                    LOG(INFO) << "failedPart: " << p.first
-                              << ", err=" << apache::thrift::util::enumNameSafe(p.second);
-                    if (p.second == nebula::cpp2::ErrorCode::E_LEADER_CHANGED) {
-                        needRetry = true;
-                        continue;
-                    }
-                }
-                if (needRetry) {
-                    continue;
-                }
-            }
-            auto resps = frpc.value().responses();
-            if (resps.empty()) {
-                LOG(FATAL) << "getProps() resps.empty())";
-            }
-            cpp2::GetPropResponse& propResp = resps.front();
-            cpp2::ResponseCommon result = propResp.get_result();
-            std::vector<cpp2::PartitionResult>& fparts = result.failed_parts;
-            if (!fparts.empty()) {
-                for (cpp2::PartitionResult& res : fparts) {
-                    LOG(INFO) << "part_id: " << res.part_id << ", part leader " << res.get_leader()
-                              << ", code " << apache::thrift::util::enumNameSafe(res.code);
-                }
-                LOG(FATAL) << "getProps() !failed_parts.empty())";
-            }
-            auto& dataSet = *propResp.props_ref();
-            auto& rows = dataSet.rows;
-            if (rows.empty()) {
-                LOG(FATAL) << "getProps() dataSet.rows.empty())";
-            }
-            ret = rows[0].values;
-            if (ret.empty()) {
-                LOG(FATAL) << "getProps() ret.empty())";
-            }
-        } while (needRetry && ++retries < retryLimit);
-        return ret;
+    std::string ConsistUtil::edgeKey(const cpp2::EdgeKey& e) {
+        auto edgeKey = TossTestUtils::makeEdgeKeyS(e);
+        auto partId = getPartId(edgeKey.src.getStr());
+        return TransactionUtils::edgeKey(vIdLen_, partId, edgeKey);
     }
-
-    folly::SemiFuture<StorageRpcResponse<cpp2::GetNeighborsResponse>>
-    getNeighborsWrapper(const std::vector<cpp2::NewEdge>& edges,
-                        int64_t limit = std::numeric_limits<int64_t>::max()) {
-        // para3
-        std::vector<Row> vertices;
-        std::set<Value> vids;
-        for (auto& e : edges) {
-            vids.insert(e.get_key().get_src());
-        }
-        for (auto& vid : vids) {
-            Row row;
-            row.emplace_back(vid);
-            vertices.emplace_back(row);
-        }
-        // para 4
-        std::vector<EdgeType> edgeTypes;
-        // para 5
-        cpp2::EdgeDirection edgeDirection = cpp2::EdgeDirection::BOTH;
-        // para 6
-        std::vector<cpp2::StatProp>* statProps = nullptr;
-        // para 7
-        std::vector<cpp2::VertexProp>* vertexProps = nullptr;
-        // para 8
-        const std::vector<cpp2::EdgeProp> edgeProps;
-        // para 9
-        const std::vector<cpp2::Expr>* expressions = nullptr;
-        // para 10
-        bool dedup = false;
-        // para 11
-        bool random = false;
-        // para 12
-        const std::vector<cpp2::OrderBy> orderBy = std::vector<cpp2::OrderBy>();
-
-        auto colNames = makeColNames(edges.back().get_props().size());
-
-        return sClient_->getNeighbors(spaceId_,
-                                      colNames,
-                                      vertices,
-                                      edgeTypes,
-                                      edgeDirection,
-                                      statProps,
-                                      vertexProps,
-                                      &edgeProps,
-                                      expressions,
-                                      dedup,
-                                      random,
-                                      orderBy,
-                                      limit);
-    }
-
-    /**
-     * @brief Get the Nei Props object,
-     *        will unique same src & dst input edges.
-     */
-    std::vector<std::string> getNeiProps(const std::vector<cpp2::NewEdge>& _edges,
-                                         int64_t limit = std::numeric_limits<int64_t>::max()) {
-        bool retLeaderChange = false;
-        auto edges(_edges);
-        std::sort(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
-            if (a.get_key().get_src() == b.get_key().get_src()) {
-                return a.get_key().get_dst() < b.get_key().get_dst();
-            }
-            return a.get_key().get_src() < b.get_key().get_src();
-        });
-        auto last = std::unique(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
-            return a.get_key().get_src() == b.get_key().get_src() &&
-                a.get_key().get_dst() == b.get_key().get_dst();
-        });
-        edges.erase(last, edges.end());
-        LOG(INFO) << "_edges.size()=" << _edges.size() << ", edges.size()=" << edges.size();
-        do {
-            auto f = getNeighborsWrapper(edges, limit);
-            f.wait();
-            if (!f.valid()) {
-                LOG(ERROR) << "!f.valid()";
-                break;
-            }
-            if (f.value().succeeded()) {
-                return extractMultiRpcResp(f.value());
-            } else {
-                LOG(ERROR) << "!f.value().succeeded()";
-            }
-            auto parts = f.value().failedParts();
-            for (auto& part : parts) {
-                if (part.second == nebula::cpp2::ErrorCode::E_LEADER_CHANGED) {
-                    retLeaderChange = true;
-                    break;
-                }
-            }
-        } while (retLeaderChange);
-        LOG(ERROR) << "getOutNeighborsProps failed";
-        std::vector<std::string> ret;
-        return ret;
-    }
-
-    using RpcResp = StorageRpcResponse<cpp2::GetNeighborsResponse>;
-
-    static std::vector<std::string> extractMultiRpcResp(RpcResp& rpc) {
-        std::vector<std::string> ret;
-        LOG(INFO) << "rpc.responses().size()=" << rpc.responses().size();
-        for (auto& resp : rpc.responses()) {
-            auto sub = extractNeiProps(resp);
-            ret.insert(ret.end(), sub.begin(), sub.end());
-        }
-        return ret;
-    }
-
 
     static std::vector<std::string> extractNeiProps(cpp2::GetNeighborsResponse& resp) {
         std::vector<std::string> ret;
@@ -446,46 +274,24 @@ struct TossEnvironment {
         }
         return ret;
     }
-
-    int32_t getCountOfNeighbors(const std::vector<cpp2::NewEdge>& edges) {
-        int32_t ret = 0;
-        auto neiPropsVec = getNeiProps(edges);
-        for (auto& prop : neiPropsVec) {
-            ret += countSquareBrackets(prop);
-        }
-        return ret;
     }
 
-    static int32_t countSquareBrackets(const std::vector<std::string>& str) {
-        int32_t ret = 0;
-        for (auto& s : str) {
-            ret += countSquareBrackets(s);
-        }
-        return ret;
+    std::string edgeKeyPrime(const cpp2::EdgeKey& e) {
+        auto edgeKey = TossTestUtils::makeEdgeKeyS(e);
+        auto partId = getPartId(edgeKey.src.getStr());
+        return TransactionUtils::edgeKeyPrime(vIdLen_, partId, edgeKey);
     }
 
-    static int32_t countSquareBrackets(const std::string& str) {
-        auto ret = TossTestUtils::splitNeiResult(str);
-        return ret.size();
+    std::string strLockKey(const cpp2::EdgeKey& e) {
+        CHECK_GT(e.edge_type, 0);
+        auto key = strInEdgeKey(e);
+        return NebulaKeyUtils::toLockKey(key);
     }
 
-    static std::vector<std::string> extractProps(const std::string& props) {
-        std::vector<std::string> ret;
-        if (props.find('[') == std::string::npos) {
-            return ret;
-        }
-        // props string shoule be [[...]], trim the []
-        auto props1 = props.substr(2, props.size() - 4);
-        folly::split("],[", props1, ret, true);
-        std::sort(ret.begin(), ret.end(), [](const std::string& a, const std::string& b) {
-            std::vector<std::string> svec1;
-            std::vector<std::string> svec2;
-            folly::split(",", a, svec1);
-            folly::split(",", b, svec2);
-            auto i1 = std::atoi(svec1[4].data());
-            auto i2 = std::atoi(svec2[4].data());
-            return i1 < i2;
-        });
+    cpp2::EdgeKey reverseEdgeKey(const cpp2::EdgeKey& key) {
+        cpp2::EdgeKey ret(key);
+        std::swap(ret.src, ret.dst);
+        ret.edge_type = 0 - ret.edge_type;
         return ret;
     }
 
@@ -498,7 +304,6 @@ struct TossEnvironment {
         // std::sort(strVals.begin(), strVals.end());
         return strVals;
     }
-
     std::vector<std::string> diffProps(std::vector<std::string> actual,
                                        std::vector<std::string> expect) {
         std::sort(actual.begin(), actual.end());
@@ -592,51 +397,67 @@ struct TossEnvironment {
         return insertEdge(e);
     }
 
-    /**
-     * @brief insert a lock according to the given edge e.
-     *        also insert reverse edge
-     * @return lockKey
-     */
-    std::string insertLock(const cpp2::NewEdge& e, bool insertInEdge) {
-        if (insertInEdge) {
-            insertReverseEdge(e);
-        }
-
-        std::string rawKey;
-        int32_t lockPartId;
-        std::tie(rawKey, lockPartId) = makeRawKey(e.get_key());
-
-        auto lockKey = NebulaKeyUtils::toLockKey(rawKey);
-        auto lockVal = encodeProps(e);
-
-        putValue(lockKey, lockVal, lockPartId);
-
-        return lockKey;
+        return putValue(key, val, part);
     }
 
-    void putValue(std::string key, std::string val, int32_t partId) {
+
+    std::string insertValidLock(const cpp2::NewEdge& e) {
+        CHECK_GT(e.key.edge_type, 0);
+        insertOutEdge(e);
+        return insertLock(e);
+        auto key = strOutEdgeKey(e.key);
+
+        auto part = NebulaKeyUtils::getPart(key);
+        return putValue(key, val, part);
+    }
+
+    std::string insertBiEdge(const cpp2::NewEdge& e) {
+        insertInEdge(e);
+        return insertOutEdge(e);
+    }
+
+    std::string putValue(std::string key, std::string val, int32_t partId) {
         LOG(INFO) << "put value, partId=" << partId << ", key=" << folly::hexlify(key);
         kvstore::BatchHolder bat;
-        bat.put(std::move(key), std::move(val));
+        bat.put(std::string(key), std::move(val));
         auto batch = encodeBatchValue(bat.getBatch());
 
         auto txnId = 0;
-        auto sf = interClient_->forwardTransaction(txnId, spaceId_, partId, std::move(batch));
+        auto sf = iClient_->forwardTransaction(txnId, spaceId_, partId, std::move(batch));
         sf.wait();
 
         if (sf.value() != nebula::cpp2::ErrorCode::SUCCEEDED) {
             LOG(FATAL) << "forward txn return=" << apache::thrift::util::enumNameSafe(sf.value());
         }
+        return key;
     }
 
     bool keyExist(folly::StringPiece key) {
-        auto sf = interClient_->getValue(vIdLen_, spaceId_, key);
+        auto sf = iClient_->getValue(vIdLen_, spaceId_, key);
         sf.wait();
         if (!sf.hasValue()) {
-            LOG(FATAL) << "interClient_->getValue has no value";
+            LOG(FATAL) << "iClient_->getValue has no value";
             return false;
         }
         return nebula::ok(sf.value());
+    }
+
+    bool outEdgeExist(const cpp2::NewEdge& e) {
+        LOG(INFO) << "check outEdgeExist: " << folly::hexlify(strOutEdgeKey(e.key));
+        CHECK_GT(e.key.edge_type, 0);
+        return keyExist(strOutEdgeKey(e.key));
+    }
+
+    bool inEdgeExist(const cpp2::NewEdge& e) {
+        LOG(INFO) << "check inEdgeExist: " << folly::hexlify(strInEdgeKey(e.key));
+        CHECK_GT(e.key.edge_type, 0);
+        return keyExist(strInEdgeKey(e.key));
+    }
+
+    bool lockExist(const cpp2::NewEdge& e) {
+        LOG(INFO) << "check lockExist: " << folly::hexlify(strLockKey(e.key));
+        CHECK_GT(e.key.edge_type, 0);
+        return keyExist(strLockKey(e.key));
     }
 
     // simple copy of Storage::BaseProcessor::encodeRowVal
@@ -667,17 +488,6 @@ struct TossEnvironment {
 
         return std::move(rowWrite).moveEncodedStr();
     }
-
-public:
-    std::shared_ptr<folly::IOThreadPoolExecutor>        executor_;
-    std::unique_ptr<meta::MetaClient>                   mClient_;
-    std::unique_ptr<StorageClient>                      sClient_;
-    std::unique_ptr<storage::InternalStorageClient>     interClient_;
-    std::unique_ptr<meta::SchemaManager>                schemaMan_;
-
-    int32_t                                             spaceId_{0};
-    int32_t                                             edgeType_{0};
-    int32_t                                             vIdLen_{0};
 };
 
 }  // namespace storage

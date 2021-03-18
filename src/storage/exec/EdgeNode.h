@@ -10,8 +10,6 @@
 #include "common/base/Base.h"
 #include "storage/exec/RelNode.h"
 #include "storage/exec/StorageIterator.h"
-#include "storage/transaction/TransactionManager.h"
-#include "storage/transaction/TossEdgeIterator.h"
 
 namespace nebula {
 namespace storage {
@@ -137,15 +135,8 @@ public:
         std::unique_ptr<kvstore::KVIterator> iter;
         ret = context_->env()->kvstore_->prefix(context_->spaceId(), partId, prefix_, &iter);
         if (ret == nebula::cpp2::ErrorCode::SUCCEEDED && iter && iter->valid()) {
-            if (context_->env()->txnMan_ &&
-                context_->env()->txnMan_->enableToss(context_->spaceId())) {
-                bool stopAtFirstEdge = true;
-                iter_.reset(new TossEdgeIterator(
-                    context_, std::move(iter), edgeType_, schemas_, &ttl_, stopAtFirstEdge));
-            } else {
-                iter_.reset(new SingleEdgeIterator(
-                    context_, std::move(iter), edgeType_, schemas_, &ttl_, false));
-            }
+            iter_.reset(new SingleEdgeIterator(
+                        planContext_, std::move(iter), edgeType_, schemas_, &ttl_, false));
         } else {
             iter_.reset();
         }
@@ -177,6 +168,7 @@ public:
         prefix_ = NebulaKeyUtils::edgePrefix(context_->vIdLen(), partId, vId, edgeType_);
         ret = context_->env()->kvstore_->prefix(context_->spaceId(), partId, prefix_, &iter);
         if (ret == nebula::cpp2::ErrorCode::SUCCEEDED && iter && iter->valid()) {
+<<<<<<< HEAD
             if (context_->env()->txnMan_ &&
                 context_->env()->txnMan_->enableToss(context_->spaceId())) {
                 bool stopAtFirstEdge = false;
@@ -186,6 +178,10 @@ public:
                 iter_.reset(new SingleEdgeIterator(
                     context_, std::move(iter), edgeType_, schemas_, &ttl_));
             }
+=======
+            iter_.reset(new SingleEdgeIterator(
+                    planContext_, std::move(iter), edgeType_, schemas_, &ttl_));
+>>>>>>> in coding base-toss
         } else {
             iter_.reset();
         }

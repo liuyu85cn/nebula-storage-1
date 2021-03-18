@@ -1,4 +1,4 @@
-/* Copyright (c) 2020 vesoft inc. All rights reserved.
+ /* Copyright (c) 2021 vesoft inc. All rights reserved.
  *
  * This source code is licensed under Apache 2.0 License,
  * attached with Common Clause Condition 1.0, found in the LICENSES directory.
@@ -6,93 +6,62 @@
 
 #include <gtest/gtest.h>
 #include "TossEnvironment.h"
+#include "TossTestExecutor.h"
 #include "folly/String.h"
 #define LOG_FMT(...) LOG(INFO) << folly::sformat(__VA_ARGS__)
 
 namespace nebula {
 namespace storage {
 
-using StorageClient = storage::GraphStorageClient;
+const std::string kMetaName = "127.0.0.1";  // NOLINT
+constexpr int32_t kMetaPort = 6500;
+const std::string kSpaceName = "test";   // NOLINT
+const std::string kEdgeName = "test_edge";   // NOLINT
+constexpr int32_t kPart = 5;
+constexpr int32_t kReplica = 3;
 
-constexpr bool kUseToss = true;
-constexpr bool kNotUseToss = false;
-
-static int32_t b_ = 1;
+static int32_t b_ = 9527;
 static int32_t gap = 1000;
-
-enum class TossTestEnum {
-    NO_TOSS = 1,
-    // add one edge
-    ADD_ONES_EDGE = 2,
-    // add two edges(same local part, same remote part)
-    TWO_EDGES_CASE_1,
-    // add two edges(same local part, diff remote part)
-    TWO_EDGES_CASE_2,
-    // add two edges(diff local part, same remote part)
-    TWO_EDGES_CASE_3,
-    // add two edges(diff local part, diff remote part)
-    TWO_EDGES_CASE_4,
-    // add 10 edges(same local part, same remote part)
-    TEN_EDGES_CASE_1,
-    // add 10 edges(same local part, diff remote part)
-    TEN_EDGES_CASE_2,
-    // add 10 edges(diff local part, same remote part)
-    TEN_EDGES_CASE_3,
-    // add 10 edges(diff local part, diff remote part)
-    TEN_EDGES_CASE_4,
-};
 
 class TossTest : public ::testing::Test {
 public:
-    TossTest() {
-        types_.emplace_back(meta::cpp2::PropertyType::INT64);
-        types_.emplace_back(meta::cpp2::PropertyType::STRING);
-        colDefs_ = genColDefs(types_);
+    static void SetUpTestCase() {
+        env = TossEnvironment::getInstance();
+        ASSERT_TRUE(env->connectToMeta(kMetaName, kMetaPort));
 
-        boost::uuids::uuid u;
-        values_.emplace_back();
-        values_.back().setInt(1024);
-        values_.emplace_back();
-        values_.back().setStr("defaul:" + boost::uuids::to_string(u));
+        std::vector<meta::cpp2::PropertyType> colTypes{meta::cpp2::PropertyType::INT64,
+                                                       meta::cpp2::PropertyType::STRING};
 
-        env_ = TossEnvironment::getInstance(kMetaName, kMetaPort);
-        env_->init(kSpaceName, kPart, kReplica, colDefs_);
+        std::string name1("test1");
+        auto intVid = meta::cpp2::PropertyType::INT64;
+        TossTest::space1 = std::make_unique<TestSpace>(
+            env, name1, kPart, kReplica, intVid, kEdgeName, colTypes);
+
+        auto stringVid = meta::cpp2::PropertyType::FIXED_STRING;
+        std::string name2("test2");
+        TossTest::space2 = std::make_unique<TestSpace>(
+            env, name2, kPart, kReplica, stringVid, kEdgeName, colTypes);
     }
+
+    static void TearDownTestCase() {}
 
     void SetUp() override {
-        if (b_ % gap) {
-            b_ = (b_ / gap + 1) * gap;
-        } else {
-            b_ += gap;
-        }
+        b_ /= gap;
+        ++b_;
+        b_ *= gap;
+
+        s1 = TossTest::space1.get();
+        s2 = TossTest::space2.get();
     }
 
-    void TearDown() override {
-    }
+    void TearDown() override {}
 
 protected:
-    TossEnvironment* env_{nullptr};
-
-    std::vector<meta::cpp2::PropertyType>   types_;
-    std::vector<meta::cpp2::ColumnDef>      colDefs_;
-    std::vector<nebula::Value>              values_;
-    boost::uuids::random_generator          gen_;
-
-    // generate ColumnDefs from data types, set default value to NULL.
-    std::vector<meta::cpp2::ColumnDef>
-    genColDefs(const std::vector<meta::cpp2::PropertyType>& types) {
-        auto N = types.size();
-        auto colNames = TossEnvironment::makeColNames(N);
-        std::vector<meta::cpp2::ColumnDef> ret(N);
-        for (auto i = 0U; i != N; ++i) {
-            ret[i].set_name(colNames[i]);
-            meta::cpp2::ColumnTypeDef tpDef;
-            tpDef.set_type(types[i]);
-            ret[i].set_type(tpDef);
-            ret[i].set_nullable(true);
-        }
-        return ret;
-    }
+    static TossEnvironment* env;
+    TestSpace* s1{nullptr};
+    TestSpace* s2{nullptr};
+    static std::unique_ptr<TestSpace> space1;
+    static std::unique_ptr<TestSpace> space2;
 };
 
 // make sure environment ok
@@ -606,7 +575,10 @@ TEST_F(TossTest, neighbors_test_4) {
 }
 
 /**
- * @brief neighbor edge + bad lock + edge
+ * test case naming rules
+ * eg  => edge
+ * glk => valid lock
+ * blk => invalid lock
  */
 TEST_F(TossTest, neighbors_test_5) {
     LOG(INFO) << "b_=" << b_;
@@ -660,8 +632,8 @@ TEST_F(TossTest, neighbors_test_6) {
 
     auto lockEdge = env_->dupEdge(edges[0]);
 
-    auto lockKey = env_->insertLock(lockEdge, true);
-    LOG(INFO) << "lock_test_1 lock hexlify = " << folly::hexlify(lockKey);
+    EXPECT_NE(edgeKeyPrime, outEdgeKey);
+    EXPECT_EQ(edgeKeyPrime.size() + 1, outEdgeKey.size());
 
     // auto rawKey0 = env_->insertEdge(edges[0]);
     auto rawKey1 = env_->insertEdge(edges[1]);
