@@ -99,7 +99,6 @@ protected:
         rootPath_.reset();
     }
 
-    // using AllLeaders = std::unordered_map<GraphSpaceID, std::vector<cpp2::LeaderInfo>>;
     using FakeHost = std::pair<HostAddr, ActiveHostsMan::AllLeaders>;
     FakeHost fakeHost(std::string ip, int port, int space, std::vector<int> parts) {
         HostAddr host(ip, port);

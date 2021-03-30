@@ -192,7 +192,7 @@ TEST(ProcessorTest, ListPartsTest) {
 
         int64_t term = 999;
         auto makeLeaderInfo = [&](PartitionID partId) {
-            cpp2::LeaderInfo leaderInfo;
+            cpp2::PartitionInfo leaderInfo;
             leaderInfo.set_part_id(partId);
             leaderInfo.set_term(term);
             return leaderInfo;
