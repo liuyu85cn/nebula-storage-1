@@ -101,7 +101,7 @@ TEST(ActiveHostsManTest, LeaderTest) {
     ASSERT_EQ(3, ActiveHostsMan::getActiveHosts(kv.get()).size());
 
     auto makePartInfo = [](int partId) {
-        cpp2::PartitionInfo part;
+        cpp2::LeaderInfo part;
         part.set_part_id(partId);
         part.set_term(partId * 1024);
         return part;
@@ -118,14 +118,14 @@ TEST(ActiveHostsManTest, LeaderTest) {
     auto part2 = makePartInfo(2);
     auto part3 = makePartInfo(3);
 
-    std::vector<cpp2::PartitionInfo> parts{part1, part2, part3};
+    std::vector<cpp2::LeaderInfo> parts{part1, part2, part3};
     std::sort(parts.begin(), parts.end(), cmpPartInfo);
 
     HostAddr host("0", 0);
 
-    std::unordered_map<GraphSpaceID, std::vector<cpp2::PartitionInfo>> leaderIds;
-    leaderIds.emplace(1, std::vector<cpp2::PartitionInfo>{part1, part2});
-    leaderIds.emplace(2, std::vector<cpp2::PartitionInfo>{part3});
+    std::unordered_map<GraphSpaceID, std::vector<cpp2::LeaderInfo>> leaderIds;
+    leaderIds.emplace(1, std::vector<cpp2::LeaderInfo>{part1, part2});
+    leaderIds.emplace(2, std::vector<cpp2::LeaderInfo>{part3});
     ActiveHostsMan::updateHostInfo(kv.get(), host, hInfo2, &leaderIds);
 
     EXPECT_EQ(3, ActiveHostsMan::getActiveHosts(kv.get()).size());

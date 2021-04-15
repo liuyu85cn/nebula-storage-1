@@ -32,9 +32,6 @@ void GetPartsAllocProcessor::process(const cpp2::GetPartsAllocReq& req) {
     }
     handleErrorCode(cpp2::ErrorCode::SUCCEEDED);
     resp_.set_parts(std::move(parts));
-
-
-
     onFinished();
 }
 

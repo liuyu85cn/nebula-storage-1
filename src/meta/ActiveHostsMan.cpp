@@ -60,7 +60,6 @@ kvstore::ResultCode ActiveHostsMan::updateHostInfo(kvstore::KVStore* kv,
             data.emplace_back(std::make_pair(leaderKeys[i], std::move(val)));
         }
     }
-    std::vector<std::string> leaderVals(leaderKeys.size());
     folly::SharedMutex::WriteHolder wHolder(LockUtils::spaceLock());
     folly::Baton<true, std::atomic> baton;
     kvstore::ResultCode ret;

@@ -356,7 +356,7 @@ public:
 
     void process(const cpp2::GetLeaderReq&) {
         CHECK_NOTNULL(env_->kvstore_);
-        std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::PartitionInfo>> allLeaders;
+        std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::LeaderInfo>> allLeaders;
         env_->kvstore_->allLeader(allLeaders);
         std::unordered_map<GraphSpaceID, std::vector<PartitionID>> leaderIds;
         for (auto& spaceLeaders : allLeaders) {

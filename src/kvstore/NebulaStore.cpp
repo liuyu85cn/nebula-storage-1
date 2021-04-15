@@ -1015,7 +1015,7 @@ ErrorOr<ResultCode, std::shared_ptr<SpacePartInfo>> NebulaStore::space(GraphSpac
 }
 
 int32_t NebulaStore::allLeader(
-    std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::PartitionInfo>>& leaderIds) {
+    std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::LeaderInfo>>& leaderIds) {
     folly::RWSpinLock::ReadHolder rh(&lock_);
     int32_t count = 0;
     for (const auto& spaceIt : spaces_) {
@@ -1023,7 +1023,7 @@ int32_t NebulaStore::allLeader(
         for (const auto& partIt : spaceIt.second->parts_) {
             auto partId = partIt.first;
             if (partIt.second->isLeader()) {
-                meta::cpp2::PartitionInfo partInfo;
+                meta::cpp2::LeaderInfo partInfo;
                 partInfo.set_part_id(partId);
                 partInfo.set_term(partIt.second->termId());
                 leaderIds[spaceId].emplace_back(partInfo);

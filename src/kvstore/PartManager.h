@@ -35,7 +35,7 @@ public:
     virtual void removePart(GraphSpaceID spaceId, PartitionID partId) = 0;
 
     virtual int32_t allLeader(
-        std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::PartitionInfo>>& leaderIds) = 0;
+        std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::LeaderInfo>>& leaderIds) = 0;
 
     virtual void addListener(GraphSpaceID spaceId,
                              PartitionID partId,
@@ -213,7 +213,7 @@ public:
 
     void onPartUpdated(const meta::PartHosts& partMeta) override;
 
-    void fetchLeaderInfo(std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::PartitionInfo>>&
+    void fetchLeaderInfo(std::unordered_map<GraphSpaceID, std::vector<meta::cpp2::LeaderInfo>>&
                              leaderParts) override;
 
     void onListenerAdded(GraphSpaceID spaceId,
