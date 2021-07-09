@@ -16,6 +16,7 @@
 #include "kvstore/NebulaStore.h"
 #include "storage/CommonUtils.h"
 #include "storage/admin/AdminTaskManager.h"
+#include "storage/transaction/TransactionManager.h"
 
 namespace nebula {
 

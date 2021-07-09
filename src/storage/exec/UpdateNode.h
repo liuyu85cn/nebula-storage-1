@@ -546,8 +546,8 @@ public:
             baton.post();
         };
 
-        planContext_->env_->kvstore_->asyncAppendBatch(
-            planContext_->spaceId_, partId, std::move(batch).value(), callback);
+        context_->planContext_->env_->kvstore_->asyncAppendBatch(
+            context_->planContext_->spaceId_, partId, std::move(batch).value(), callback);
         baton.wait();
         return ret;
     }
